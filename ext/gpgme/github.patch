@@ -1,0 +1,149 @@
+diff --git a/src/posix-io.c b/src/posix-io.c
+index a351806f..f2a79252 100644
+--- a/src/posix-io.c
++++ b/src/posix-io.c
+@@ -143,6 +143,7 @@ _gpgme_io_pipe (int filedes[2], int inherit_idx)
+ {
+   int saved_errno;
+   int err;
++  int oldflags;
+   TRACE_BEG2 (DEBUG_SYSIO, "_gpgme_io_pipe", filedes,
+ 	      "inherit_idx=%i (GPGME uses it for %s)",
+ 	      inherit_idx, inherit_idx ? "reading" : "writing");
+@@ -151,8 +152,8 @@ _gpgme_io_pipe (int filedes[2], int inherit_idx)
+   if (err < 0)
+     return TRACE_SYSRES (err);
+ 
+-  /* FIXME: Should get the old flags first.  */
+-  err = fcntl (filedes[1 - inherit_idx], F_SETFD, FD_CLOEXEC);
++  oldflags = fcntl (filedes[1 - inherit_idx], F_GETFD, 0);
++  err = fcntl (filedes[1 - inherit_idx], F_SETFD, oldflags | FD_CLOEXEC);
+   saved_errno = errno;
+   if (err < 0)
+     {
+@@ -282,51 +283,11 @@ _gpgme_io_set_nonblocking (int fd)
+ static long int
+ get_max_fds (void)
+ {
+-  const char *source = NULL;
++  char *source = NULL;
+   long int fds = -1;
+   int rc;
+ 
+-  /* Under Linux we can figure out the highest used file descriptor by
+-   * reading /proc/self/fd.  This is in the common cases much faster
+-   * than for example doing 4096 close calls where almost all of them
+-   * will fail.
+-   *
+-   * Unfortunately we can't call opendir between fork and exec in a
+-   * multi-threaded process because opendir uses malloc and thus a
+-   * mutex which may deadlock with a malloc in another thread.  Thus
+-   * the code is not used until we can have a opendir variant which
+-   * does not use malloc.  */
+-/* #ifdef __linux__ */
+-/*   { */
+-/*     DIR *dir = NULL; */
+-/*     struct dirent *dir_entry; */
+-/*     const char *s; */
+-/*     int x; */
+-
+-/*     dir = opendir ("/proc/self/fd"); */
+-/*     if (dir) */
+-/*       { */
+-/*         while ((dir_entry = readdir (dir))) */
+-/*           { */
+-/*             s = dir_entry->d_name; */
+-/*             if ( *s < '0' || *s > '9') */
+-/*               continue; */
+-/*             x = atoi (s); */
+-/*             if (x > fds) */
+-/*               fds = x; */
+-/*           } */
+-/*         closedir (dir); */
+-/*       } */
+-/*     if (fds != -1) */
+-/*       { */
+-/*         fds++; */
+-/*         source = "/proc"; */
+-/*       } */
+-/*     } */
+-/* #endif /\* __linux__ *\/ */
+-
+ #ifdef RLIMIT_NOFILE
+-  if (fds == -1)
+     {
+       struct rlimit rl;
+       rc = getrlimit (RLIMIT_NOFILE, &rl);
+@@ -380,16 +341,6 @@ get_max_fds (void)
+       fds = 1024;
+     }
+ 
+-  /* AIX returns INT32_MAX instead of a proper value.  We assume that
+-   * this is always an error and use a more reasonable limit.  */
+-#ifdef INT32_MAX
+-  if (fds == INT32_MAX)
+-    {
+-      source = "aix-fix";
+-      fds = 1024;
+-    }
+-#endif
+-
+   TRACE2 (DEBUG_SYSIO, "gpgme:max_fds", 0, "max fds=%i (%s)", fds, source);
+   return fds;
+ }
+@@ -459,9 +410,10 @@ _gpgme_io_spawn (const char *path, char *const argv[], unsigned int flags,
+       /* Intermediate child to prevent zombie processes.  */
+       if ((pid = fork ()) == 0)
+ 	{
+-	  /* Child.  */
+-          int max_fds = -1;
++          int max_fds = get_max_fds();
+           int fd;
++
++	  /* Child.  */
+ 	  int seen_stdin = 0;
+ 	  int seen_stdout = 0;
+ 	  int seen_stderr = 0;
+@@ -469,32 +421,7 @@ _gpgme_io_spawn (const char *path, char *const argv[], unsigned int flags,
+ 	  if (atfork)
+ 	    atfork (atforkvalue, 0);
+ 
+-          /* First close all fds which will not be inherited.  If we
+-           * have closefrom(2) we first figure out the highest fd we
+-           * do not want to close, then call closefrom, and on success
+-           * use the regular code to close all fds up to the start
+-           * point of closefrom.  Note that Solaris' closefrom does
+-           * not return errors.  */
+-#ifdef HAVE_CLOSEFROM
+-          {
+-            fd = -1;
+-            for (i = 0; fd_list[i].fd != -1; i++)
+-              if (fd_list[i].fd > fd)
+-                fd = fd_list[i].fd;
+-            fd++;
+-#ifdef __sun
+-            closefrom (fd);
+-            max_fds = fd;
+-#else /*!__sun */
+-            while ((i = closefrom (fd)) && errno == EINTR)
+-              ;
+-            if (!i || errno == EBADF)
+-              max_fds = fd;
+-#endif /*!__sun*/
+-          }
+-#endif /*HAVE_CLOSEFROM*/
+-          if (max_fds == -1)
+-            max_fds = get_max_fds ();
++          /* First close all fds which will not be inherited. */
+           for (fd = 0; fd < max_fds; fd++)
+             {
+               for (i = 0; fd_list[i].fd != -1; i++)
+@@ -543,6 +470,8 @@ _gpgme_io_spawn (const char *path, char *const argv[], unsigned int flags,
+ 	  if (! seen_stdin || ! seen_stdout || !seen_stderr)
+ 	    {
+ 	      fd = open ("/dev/null", O_RDWR);
++	      int oldflags = fcntl (fd, F_GETFD, 0);
++	      fcntl (fd, F_SETFD, oldflags | FD_CLOEXEC);
+ 	      if (fd == -1)
+ 		{
+ 		  /* The debug file descriptor is not dup'ed, so we

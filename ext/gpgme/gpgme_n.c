@@ -202,26 +202,27 @@ rb_s_gpgme_ctx_get_engine_info (VALUE dummy, VALUE vctx, VALUE rinfo)
   long idx;
 
   gpgme_ctx_t ctx;
+  gpgme_engine_info_t info;
 
   UNWRAP_GPGME_CTX(vctx, ctx);
   if (!ctx)
     rb_raise (rb_eArgError, "released ctx");
 
-  gpgme_engine_info_t info = gpgme_ctx_get_engine_info (ctx);
-      for (idx = 0; info; info = info->next, idx++)
-	{
-	  VALUE vinfo = rb_class_new_instance (0, NULL, cEngineInfo);
-	  rb_iv_set (vinfo, "@protocol", INT2FIX(info->protocol));
-	  if (info->file_name)
-	    rb_iv_set (vinfo, "@file_name", rb_str_new2 (info->file_name));
-	  if (info->version)
-	    rb_iv_set (vinfo, "@version", rb_str_new2 (info->version));
-	  if (info->req_version)
-	    rb_iv_set (vinfo, "@req_version", rb_str_new2 (info->req_version));
-	  if (info->home_dir)
-	    rb_iv_set (vinfo, "@home_dir", rb_str_new2 (info->home_dir));
-	  rb_ary_store (rinfo, idx, vinfo);
-	}
+  info = gpgme_ctx_get_engine_info (ctx);
+  for (idx = 0; info; info = info->next, idx++)
+  {
+    VALUE vinfo = rb_class_new_instance (0, NULL, cEngineInfo);
+    rb_iv_set (vinfo, "@protocol", INT2FIX(info->protocol));
+    if (info->file_name)
+      rb_iv_set (vinfo, "@file_name", rb_str_new2 (info->file_name));
+    if (info->version)
+      rb_iv_set (vinfo, "@version", rb_str_new2 (info->version));
+    if (info->req_version)
+      rb_iv_set (vinfo, "@req_version", rb_str_new2 (info->req_version));
+    if (info->home_dir)
+      rb_iv_set (vinfo, "@home_dir", rb_str_new2 (info->home_dir));
+    rb_ary_store (rinfo, idx, vinfo);
+  }
   return Qnil;
 }
 
@@ -230,16 +231,17 @@ rb_s_gpgme_ctx_set_engine_info (VALUE dummy, VALUE vctx, VALUE vproto, VALUE vfi
 			    VALUE vhome_dir)
 {
   gpgme_ctx_t ctx;
+  gpgme_error_t err;
 
   UNWRAP_GPGME_CTX(vctx, ctx);
   if (!ctx)
     rb_raise (rb_eArgError, "released ctx");
-  gpgme_error_t err = gpgme_ctx_set_engine_info (ctx,
+  err = gpgme_ctx_set_engine_info (ctx,
                NUM2INT(vproto),
-					     NIL_P(vfile_name) ? NULL :
-					     StringValueCStr(vfile_name),
-					     NIL_P(vhome_dir) ? NULL :
-					     StringValueCStr(vhome_dir));
+               NIL_P(vfile_name) ? NULL :
+               StringValueCStr(vfile_name),
+               NIL_P(vhome_dir) ? NULL :
+               StringValueCStr(vhome_dir));
   return LONG2NUM(err);
 }
 
@@ -299,7 +301,7 @@ rb_s_gpgme_data_new_from_mem (VALUE dummy, VALUE rdh, VALUE vbuffer,
   size_t size = NUM2UINT(vsize);
   gpgme_error_t err;
 
-  if (RSTRING_LEN(vbuffer) < size)
+  if ((unsigned long)RSTRING_LEN(vbuffer) < size)
     rb_raise (rb_eArgError, "argument out of range");
 
   err = gpgme_data_new_from_mem (&dh, StringValuePtr(vbuffer), size, 1);
@@ -472,9 +474,10 @@ static VALUE
 rb_s_gpgme_data_get_file_name (VALUE dummy, VALUE vdh)
 {
   gpgme_data_t dh;
+  const char *result;
 
   UNWRAP_GPGME_DATA(vdh, dh);
-  const char *result = gpgme_data_get_file_name (dh);
+  result = gpgme_data_get_file_name (dh);
   return result ? rb_str_new2 (result) : Qnil;
 }
 
