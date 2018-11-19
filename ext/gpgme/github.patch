@@ -1,27 +1,22 @@
 diff --git a/src/posix-io.c b/src/posix-io.c
-index a351806f..4a41560c 100644
+index a351806f..982278db 100644
 --- a/src/posix-io.c
 +++ b/src/posix-io.c
-@@ -31,6 +31,7 @@
- #include <errno.h>
- #include <signal.h>
- #include <fcntl.h>
-+#include <poll.h>
- #ifdef HAVE_UNISTD_H
- # include <unistd.h>
- #endif
-@@ -59,7 +60,9 @@
- #include "ath.h"
- #include "debug.h"
+@@ -47,6 +47,13 @@
+ #include <ctype.h>
+ #include <sys/resource.h>
  
--
-+#define POLLFD_MAX 65536
++#ifdef USE_LINUX_GETDENTS
++# include <sys/syscall.h>
++# include <sys/types.h>
++# include <dirent.h>
++#endif /*USE_LINUX_GETDENTS*/
 +
 +
- void
- _gpgme_io_subsystem_init (void)
- {
-@@ -143,6 +146,7 @@ _gpgme_io_pipe (int filedes[2], int inherit_idx)
+ #if __linux__
+ # include <sys/types.h>
+ # include <dirent.h>
+@@ -143,6 +150,7 @@ _gpgme_io_pipe (int filedes[2], int inherit_idx)
  {
    int saved_errno;
    int err;
@@ -29,7 +24,7 @@ index a351806f..4a41560c 100644
    TRACE_BEG2 (DEBUG_SYSIO, "_gpgme_io_pipe", filedes,
  	      "inherit_idx=%i (GPGME uses it for %s)",
  	      inherit_idx, inherit_idx ? "reading" : "writing");
-@@ -151,8 +155,8 @@ _gpgme_io_pipe (int filedes[2], int inherit_idx)
+@@ -151,8 +159,8 @@ _gpgme_io_pipe (int filedes[2], int inherit_idx)
    if (err < 0)
      return TRACE_SYSRES (err);
  
@@ -40,20 +35,33 @@ index a351806f..4a41560c 100644
    saved_errno = errno;
    if (err < 0)
      {
-@@ -282,51 +286,11 @@ _gpgme_io_set_nonblocking (int fd)
+@@ -279,6 +287,22 @@ _gpgme_io_set_nonblocking (int fd)
+ }
+ 
+ 
++#ifdef USE_LINUX_GETDENTS
++/* This is not declared in public headers; getdents64(2) says that we must
++ * define it ourselves.  */
++struct linux_dirent64
++{
++  ino64_t d_ino;
++  off64_t d_off;
++  unsigned short d_reclen;
++  unsigned char d_type;
++  char d_name[];
++};
++
++# define DIR_BUF_SIZE 1024
++#endif /*USE_LINUX_GETDENTS*/
++
++
  static long int
  get_max_fds (void)
  {
--  const char *source = NULL;
-+  char *source = NULL;
-   long int fds = -1;
-   int rc;
- 
--  /* Under Linux we can figure out the highest used file descriptor by
--   * reading /proc/self/fd.  This is in the common cases much faster
--   * than for example doing 4096 close calls where almost all of them
--   * will fail.
--   *
+@@ -291,39 +315,57 @@ get_max_fds (void)
+    * than for example doing 4096 close calls where almost all of them
+    * will fail.
+    *
 -   * Unfortunately we can't call opendir between fork and exec in a
 -   * multi-threaded process because opendir uses malloc and thus a
 -   * mutex which may deadlock with a malloc in another thread.  Thus
@@ -87,144 +95,57 @@ index a351806f..4a41560c 100644
 -/*       } */
 -/*     } */
 -/* #endif /\* __linux__ *\/ */
--
++   * We can't use the normal opendir/readdir/closedir interface between
++   * fork and exec in a multi-threaded process because opendir uses
++   * malloc and thus a mutex which may deadlock with a malloc in another
++   * thread.  However, the underlying getdents system call is safe.  */
++#ifdef USE_LINUX_GETDENTS
++  {
++    int dir_fd;
++    char dir_buf[DIR_BUF_SIZE];
++    struct linux_dirent64 *dir_entry;
++    int r, pos;
++    const char *s;
++    int x;
++
++    dir_fd = open ("/proc/self/fd", O_RDONLY | O_DIRECTORY);
++    if (dir_fd != -1)
++      {
++        for (;;)
++          {
++            r = syscall(SYS_getdents64, dir_fd, dir_buf, DIR_BUF_SIZE);
++            if (r == -1)
++              {
++                /* Fall back to other methods.  */
++                fds = -1;
++                break;
++              }
++            if (r == 0)
++              break;
++
++            for (pos = 0; pos < r; pos += dir_entry->d_reclen)
++              {
++                dir_entry = (struct linux_dirent64 *) (dir_buf + pos);
++                s = dir_entry->d_name;
++                if (*s < '0' || *s > '9')
++                  continue;
++                /* atoi is not guaranteed to be async-signal-safe.  */
++                for (x = 0; *s >= '0' && *s <= '9'; s++)
++                  x = x * 10 + (*s - '0');
++                if (!*s && x > fds && x != dir_fd)
++                  fds = x;
++              }
++          }
++
++        close (dir_fd);
++      }
++    if (fds != -1)
++      {
++        fds++;
++        source = "/proc";
++      }
++    }
++#endif /*USE_LINUX_GETDENTS*/
+ 
  #ifdef RLIMIT_NOFILE
--  if (fds == -1)
-     {
-       struct rlimit rl;
-       rc = getrlimit (RLIMIT_NOFILE, &rl);
-@@ -380,16 +344,6 @@ get_max_fds (void)
-       fds = 1024;
-     }
- 
--  /* AIX returns INT32_MAX instead of a proper value.  We assume that
--   * this is always an error and use a more reasonable limit.  */
--#ifdef INT32_MAX
--  if (fds == INT32_MAX)
--    {
--      source = "aix-fix";
--      fds = 1024;
--    }
--#endif
--
-   TRACE2 (DEBUG_SYSIO, "gpgme:max_fds", 0, "max fds=%i (%s)", fds, source);
-   return fds;
- }
-@@ -433,8 +387,11 @@ _gpgme_io_spawn (const char *path, char *const argv[], unsigned int flags,
- {
-   pid_t pid;
-   int i;
-+  int start;
-   int status;
-   int signo;
-+  int oldflags;
-+  struct pollfd pfd[POLLFD_MAX];
- 
-   TRACE_BEG1 (DEBUG_SYSIO, "_gpgme_io_spawn", path,
- 	      "path=%s", path);
-@@ -459,9 +416,10 @@ _gpgme_io_spawn (const char *path, char *const argv[], unsigned int flags,
-       /* Intermediate child to prevent zombie processes.  */
-       if ((pid = fork ()) == 0)
- 	{
--	  /* Child.  */
--          int max_fds = -1;
-+          int max_fds = get_max_fds();
-           int fd;
-+
-+	  /* Child.  */
- 	  int seen_stdin = 0;
- 	  int seen_stdout = 0;
- 	  int seen_stderr = 0;
-@@ -469,40 +427,40 @@ _gpgme_io_spawn (const char *path, char *const argv[], unsigned int flags,
- 	  if (atfork)
- 	    atfork (atforkvalue, 0);
- 
--          /* First close all fds which will not be inherited.  If we
--           * have closefrom(2) we first figure out the highest fd we
--           * do not want to close, then call closefrom, and on success
--           * use the regular code to close all fds up to the start
--           * point of closefrom.  Note that Solaris' closefrom does
--           * not return errors.  */
--#ifdef HAVE_CLOSEFROM
--          {
--            fd = -1;
--            for (i = 0; fd_list[i].fd != -1; i++)
--              if (fd_list[i].fd > fd)
--                fd = fd_list[i].fd;
--            fd++;
--#ifdef __sun
--            closefrom (fd);
--            max_fds = fd;
--#else /*!__sun */
--            while ((i = closefrom (fd)) && errno == EINTR)
--              ;
--            if (!i || errno == EBADF)
--              max_fds = fd;
--#endif /*!__sun*/
--          }
--#endif /*HAVE_CLOSEFROM*/
--          if (max_fds == -1)
--            max_fds = get_max_fds ();
--          for (fd = 0; fd < max_fds; fd++)
--            {
--              for (i = 0; fd_list[i].fd != -1; i++)
--                if (fd_list[i].fd == fd)
--                  break;
--              if (fd_list[i].fd == -1)
--                close (fd);
--            }
-+          /* First close all fds which will not be inherited. */
-+	  for (start = 0; start < max_fds; start += POLLFD_MAX)
-+	    {
-+	      int nonzero;
-+	      for (fd = start; fd < start + POLLFD_MAX; fd++)
-+		{
-+		  struct pollfd *p = &pfd[fd - start];
-+		  p->fd = (fd < max_fds) ? fd : -1;
-+		  p->events = 0;
-+		}
-+	      do
-+	        {
-+		  nonzero = poll (pfd, max_fds < POLLFD_MAX ? max_fds : POLLFD_MAX, 0);
-+		}
-+	      while (nonzero <= 0 && (errno == EINTR || errno == EAGAIN));
-+	      if (nonzero <= 0)
-+		{
-+		  TRACE_LOG1 ("poll failed in child: %s\n",
-+			      strerror (errno));
-+		  _exit(8);
-+		}
-+
-+	      for (fd = start; fd < start + POLLFD_MAX && fd < max_fds; fd++)
-+		{
-+		  for (i = 0; fd_list[i].fd != -1; i++)
-+		    if (fd_list[i].fd == fd)
-+		      break;
-+		  if (fd_list[i].fd == -1)
-+		    {
-+		      if (! pfd[fd - start].revents & POLLNVAL)
-+			close (fd);
-+		    }
-+		}
-+	    }
- 
- 	  /* And now dup and close those to be duplicated.  */
- 	  for (i = 0; fd_list[i].fd != -1; i++)
-@@ -526,6 +484,8 @@ _gpgme_io_spawn (const char *path, char *const argv[], unsigned int flags,
- 		continue;
- 
- 	      res = dup2 (fd_list[i].fd, fd_list[i].dup_to);
-+	      //oldflags = fcntl (fd_list[i].dup_to, F_GETFD, 0);
-+	      //fcntl (fd_list[i].dup_to, F_SETFD, oldflags | FD_CLOEXEC);
- 	      if (res < 0)
- 		{
- #if 0
-@@ -543,6 +503,8 @@ _gpgme_io_spawn (const char *path, char *const argv[], unsigned int flags,
- 	  if (! seen_stdin || ! seen_stdout || !seen_stderr)
- 	    {
- 	      fd = open ("/dev/null", O_RDWR);
-+	      oldflags = fcntl (fd, F_GETFD, 0);
-+	      fcntl (fd, F_SETFD, oldflags | FD_CLOEXEC);
- 	      if (fd == -1)
- 		{
- 		  /* The debug file descriptor is not dup'ed, so we
+   if (fds == -1)

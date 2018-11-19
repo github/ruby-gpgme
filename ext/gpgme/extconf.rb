@@ -120,7 +120,7 @@ EOS
       '--disable-gpgsm-test',
       # We only need the C API.
       '--disable-languages',
-      "CFLAGS=-fPIC #{ENV["CFLAGS"]}",
+      "CFLAGS=-fPIC -DUSE_LINUX_GETDENTS #{ENV["CFLAGS"]}",
     ]
     checkpoint = "#{recipe.target}/#{recipe.name}-#{recipe.version}-#{recipe.host}.installed"
     unless File.exist?(checkpoint)
