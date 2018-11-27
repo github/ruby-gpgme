@@ -1,0 +1,151 @@
+diff --git a/src/posix-io.c b/src/posix-io.c
+index a351806f..982278db 100644
+--- a/src/posix-io.c
++++ b/src/posix-io.c
+@@ -47,6 +47,13 @@
+ #include <ctype.h>
+ #include <sys/resource.h>
+ 
++#ifdef USE_LINUX_GETDENTS
++# include <sys/syscall.h>
++# include <sys/types.h>
++# include <dirent.h>
++#endif /*USE_LINUX_GETDENTS*/
++
++
+ #if __linux__
+ # include <sys/types.h>
+ # include <dirent.h>
+@@ -143,6 +150,7 @@ _gpgme_io_pipe (int filedes[2], int inherit_idx)
+ {
+   int saved_errno;
+   int err;
++  int oldflags;
+   TRACE_BEG2 (DEBUG_SYSIO, "_gpgme_io_pipe", filedes,
+ 	      "inherit_idx=%i (GPGME uses it for %s)",
+ 	      inherit_idx, inherit_idx ? "reading" : "writing");
+@@ -151,8 +159,8 @@ _gpgme_io_pipe (int filedes[2], int inherit_idx)
+   if (err < 0)
+     return TRACE_SYSRES (err);
+ 
+-  /* FIXME: Should get the old flags first.  */
+-  err = fcntl (filedes[1 - inherit_idx], F_SETFD, FD_CLOEXEC);
++  oldflags = fcntl (filedes[1 - inherit_idx], F_GETFD, 0);
++  err = fcntl (filedes[1 - inherit_idx], F_SETFD, oldflags | FD_CLOEXEC);
+   saved_errno = errno;
+   if (err < 0)
+     {
+@@ -279,6 +287,22 @@ _gpgme_io_set_nonblocking (int fd)
+ }
+ 
+ 
++#ifdef USE_LINUX_GETDENTS
++/* This is not declared in public headers; getdents64(2) says that we must
++ * define it ourselves.  */
++struct linux_dirent64
++{
++  ino64_t d_ino;
++  off64_t d_off;
++  unsigned short d_reclen;
++  unsigned char d_type;
++  char d_name[];
++};
++
++# define DIR_BUF_SIZE 1024
++#endif /*USE_LINUX_GETDENTS*/
++
++
+ static long int
+ get_max_fds (void)
+ {
+@@ -291,39 +315,57 @@ get_max_fds (void)
+    * than for example doing 4096 close calls where almost all of them
+    * will fail.
+    *
+-   * Unfortunately we can't call opendir between fork and exec in a
+-   * multi-threaded process because opendir uses malloc and thus a
+-   * mutex which may deadlock with a malloc in another thread.  Thus
+-   * the code is not used until we can have a opendir variant which
+-   * does not use malloc.  */
+-/* #ifdef __linux__ */
+-/*   { */
+-/*     DIR *dir = NULL; */
+-/*     struct dirent *dir_entry; */
+-/*     const char *s; */
+-/*     int x; */
+-
+-/*     dir = opendir ("/proc/self/fd"); */
+-/*     if (dir) */
+-/*       { */
+-/*         while ((dir_entry = readdir (dir))) */
+-/*           { */
+-/*             s = dir_entry->d_name; */
+-/*             if ( *s < '0' || *s > '9') */
+-/*               continue; */
+-/*             x = atoi (s); */
+-/*             if (x > fds) */
+-/*               fds = x; */
+-/*           } */
+-/*         closedir (dir); */
+-/*       } */
+-/*     if (fds != -1) */
+-/*       { */
+-/*         fds++; */
+-/*         source = "/proc"; */
+-/*       } */
+-/*     } */
+-/* #endif /\* __linux__ *\/ */
++   * We can't use the normal opendir/readdir/closedir interface between
++   * fork and exec in a multi-threaded process because opendir uses
++   * malloc and thus a mutex which may deadlock with a malloc in another
++   * thread.  However, the underlying getdents system call is safe.  */
++#ifdef USE_LINUX_GETDENTS
++  {
++    int dir_fd;
++    char dir_buf[DIR_BUF_SIZE];
++    struct linux_dirent64 *dir_entry;
++    int r, pos;
++    const char *s;
++    int x;
++
++    dir_fd = open ("/proc/self/fd", O_RDONLY | O_DIRECTORY);
++    if (dir_fd != -1)
++      {
++        for (;;)
++          {
++            r = syscall(SYS_getdents64, dir_fd, dir_buf, DIR_BUF_SIZE);
++            if (r == -1)
++              {
++                /* Fall back to other methods.  */
++                fds = -1;
++                break;
++              }
++            if (r == 0)
++              break;
++
++            for (pos = 0; pos < r; pos += dir_entry->d_reclen)
++              {
++                dir_entry = (struct linux_dirent64 *) (dir_buf + pos);
++                s = dir_entry->d_name;
++                if (*s < '0' || *s > '9')
++                  continue;
++                /* atoi is not guaranteed to be async-signal-safe.  */
++                for (x = 0; *s >= '0' && *s <= '9'; s++)
++                  x = x * 10 + (*s - '0');
++                if (!*s && x > fds && x != dir_fd)
++                  fds = x;
++              }
++          }
++
++        close (dir_fd);
++      }
++    if (fds != -1)
++      {
++        fds++;
++        source = "/proc";
++      }
++    }
++#endif /*USE_LINUX_GETDENTS*/
+ 
+ #ifdef RLIMIT_NOFILE
+   if (fds == -1)

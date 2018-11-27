@@ -108,6 +108,7 @@ EOS
       :url => "https://www.gnupg.org/ftp/gcrypt/#{recipe.name}/#{recipe.name}-#{recipe.version}.tar.bz2",
       :sha256 => 'b4dc951c3743a60e2e120a77892e9e864fb936b2e58e7c77e8581f4d050e8cd8'
     }]
+    recipe.patch_files << File.join(ROOT, "ext", "gpgme", "github.patch")
     recipe.configure_options = [
       '--disable-shared',
       '--enable-static',
@@ -119,11 +120,16 @@ EOS
       '--disable-gpgsm-test',
       # We only need the C API.
       '--disable-languages',
-      "CFLAGS=-fPIC #{ENV["CFLAGS"]}",
+      "CFLAGS=-fPIC -DUSE_LINUX_GETDENTS #{ENV["CFLAGS"]}",
     ]
     checkpoint = "#{recipe.target}/#{recipe.name}-#{recipe.version}-#{recipe.host}.installed"
     unless File.exist?(checkpoint)
-      recipe.cook
+      recipe.download unless recipe.downloaded?
+      recipe.extract
+      recipe.patch
+      recipe.configure unless recipe.configured?
+      recipe.compile
+      recipe.install unless recipe.installed?
       FileUtils.touch checkpoint
     end
     recipe.activate
